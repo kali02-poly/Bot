@@ -835,13 +835,16 @@ PolyBot/
 │   ├── test_pnl_tracker.py
 │   └── ...                         # 16 more test files
 │
-├── docs/                           # Documentation in 7 languages
+├── docs/                           # Documentation in 10 languages
 │   ├── MANUAL_AR.md                # Arabic
 │   ├── MANUAL_ES.md                # Spanish
 │   ├── MANUAL_FR.md                # French
 │   ├── MANUAL_JA.md                # Japanese
+│   ├── MANUAL_KLINGON.md           # Klingon (Star Trek)
 │   ├── MANUAL_PL.md                # Polish
 │   ├── MANUAL_RU.md                # Russian
+│   ├── MANUAL_SINDARIN.md          # Sindarin (Lord of the Rings)
+│   ├── MANUAL_VALYRIAN.md          # High Valyrian (Game of Thrones)
 │   ├── MANUAL_ZH.md                # Chinese
 │   └── images/                     # Documentation images
 │
@@ -1065,16 +1068,19 @@ You are free to use, modify, and distribute this software. See the full license 
 
 ## 📚 Additional Documentation
 
-Documentation is available in 7 languages in the `docs/` folder:
+Documentation is available in 10 languages in the `docs/` folder:
 
 | Language | File |
 |----------|------|
 | Arabic | [docs/MANUAL_AR.md](docs/MANUAL_AR.md) |
 | Chinese | [docs/MANUAL_ZH.md](docs/MANUAL_ZH.md) |
 | French | [docs/MANUAL_FR.md](docs/MANUAL_FR.md) |
+| High Valyrian (Game of Thrones) | [docs/MANUAL_VALYRIAN.md](docs/MANUAL_VALYRIAN.md) |
 | Japanese | [docs/MANUAL_JA.md](docs/MANUAL_JA.md) |
+| Klingon (Star Trek) | [docs/MANUAL_KLINGON.md](docs/MANUAL_KLINGON.md) |
 | Polish | [docs/MANUAL_PL.md](docs/MANUAL_PL.md) |
 | Russian | [docs/MANUAL_RU.md](docs/MANUAL_RU.md) |
+| Sindarin (Lord of the Rings) | [docs/MANUAL_SINDARIN.md](docs/MANUAL_SINDARIN.md) |
 | Spanish | [docs/MANUAL_ES.md](docs/MANUAL_ES.md) |
 
 ---
