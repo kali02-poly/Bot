@@ -570,14 +570,12 @@ async def make_proxied_request_async(
     """Async version of make_proxied_request using aiohttp.
 
     Uses exponential backoff with jitter for retries.
-    Creates a single session for all retry attempts to avoid unclosed session warnings.
+    Uses ``async with`` to manage the session lifetime and avoid unclosed session warnings.
     """
     pm = get_proxy_manager()
     last_error = None
 
-    # Create session once outside retry loop to avoid unclosed session warnings
-    session = await pm.get_aiohttp_session()
-    try:
+    async with await pm.get_aiohttp_session() as session:
         for attempt in range(max_retries):
             proxy = pm.get_best_proxy(use_residential=(attempt >= max_retries // 2))
 
@@ -686,9 +684,6 @@ async def make_proxied_request_async(
                 await asyncio.sleep(delay)
 
         raise last_error or Exception(f"All {max_retries} async retries failed")
-    finally:
-        # Always close the session to avoid "Unclosed client session" warnings
-        await session.close()
 
 
 # Test function
