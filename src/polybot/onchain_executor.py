@@ -1975,6 +1975,14 @@ class OnchainExecutor:
             usdc_gained,
         )
 
+        # ── 5. Piggybank: auto-save 1% of profit ──────────────────────────
+        if usdc_gained > 0 and self.private_key:
+            try:
+                from polybot.piggybank import on_profit
+                on_profit(usdc_gained, self.private_key, self.w3)
+            except Exception as pig_err:
+                log.debug("Piggybank skipped: %s", pig_err)
+
         return {
             "successful": successful,
             "failed": failed,

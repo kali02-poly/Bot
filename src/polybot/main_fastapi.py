@@ -269,9 +269,15 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler - initializes RPC manager at startup."""
     settings = get_settings()
 
+    # Sniper mode detection (env var or mode config)
+    from polybot.sniper import is_sniper_mode
+    sniper_active = is_sniper_mode() or settings.mode == "sniper"
+
     # Log startup configuration
     logger.info("=" * 60)
     logger.info("🤠 PolyBot Ferox starting up...")
+    if sniper_active:
+        logger.info("🎯 SNIPER MODE ENABLED")
     logger.info("=" * 60)
 
     # Check Alchemy API key from settings
@@ -466,6 +472,11 @@ async def lifespan(app: FastAPI):
             "🛑 REDEEM_ONLY=true – Scanner deaktiviert, keine neuen Trades. "
             "Nur bereits aktive Positionen werden redeemed."
         )
+    elif settings.mode == "sniper" or sniper_active:
+        # ── SNIPER MODE ──
+        from polybot.sniper import run_sniper_loop
+        logger.info("🎯 SNIPER MODE — Trading only in last 30s of each 5-min slot")
+        asyncio.create_task(run_sniper_loop())
     else:
         asyncio.create_task(continuous_scanner())
 
