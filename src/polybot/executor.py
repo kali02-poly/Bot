@@ -1,11 +1,7 @@
 """Order execution via onchain_executor on Polygon.
 
-V66: Trade placement delegated entirely to onchain_executor.execute_trade().
-No more py_clob_client MarketOrderArgs – all trades go through the CLOB
-REST taker flow in onchain_executor.py.
-
-Includes Kelly criterion position sizing.
-Now supports async operations for non-blocking trading (March 2026).
+V66+: Fixed Kelly sizing (confidence is 0-1, not 0-100).
+Integrated risk manager for pre-trade checks and performance-based sizing.
 """
 
 from __future__ import annotations
@@ -22,9 +18,7 @@ _client_lock = asyncio.Lock()
 
 
 def invalidate_l2_cache() -> None:
-    """Invalidate cached L2 credentials so they are re-derived on next use."""
-    import os
-
+    """Invalidate cached L2 credentials."""
     if os.path.exists("/tmp/polymarket_creds.json"):
         os.remove("/tmp/polymarket_creds.json")
     for key in ["POLY_API_KEY", "POLY_API_SECRET", "POLY_API_PASSPHRASE"]:
@@ -33,10 +27,7 @@ def invalidate_l2_cache() -> None:
 
 
 def get_clob_client():
-    """Create a ClobClient with L2 API credentials from environment.
-
-    Returns ClobClient instance or None if credentials are not available.
-    """
+    """Create a ClobClient with L2 API credentials from environment."""
     try:
         from py_clob_client.client import ClobClient
         from py_clob_client.clob_types import ApiCreds
@@ -69,57 +60,75 @@ def calc_kelly_size(
     confidence: float,
     balance: float,
     base_trade_amount: float,
-    win_pct_override: float | None = None,
-    loss_pct_override: float | None = None,
 ) -> dict:
     """Calculate Kelly criterion position size.
 
+    FIXED: confidence is 0.0-1.0 (not 0-100).
+
+    Kelly formula: f* = (p*b - q) / b
+    where p = win probability, q = 1-p, b = win/loss ratio
+
+    Then apply:
+    - Half-Kelly multiplier (from config)
+    - Risk manager sizing factor (performance-based)
+    - Hard caps (max position, max % of balance)
+
     Args:
-        confidence: Signal confidence in range 0-100 (e.g. 67.0 for 67%)
-        balance: Current wallet balance in USD
-        base_trade_amount: Base trade size for cap calculation
-        win_pct_override: Override default win% (for backtested values)
-        loss_pct_override: Override default loss% (for backtested values)
+        confidence: Win probability (0.0 to 1.0)
+        balance: Current USDC balance
+        base_trade_amount: Base trade size from config
 
     Returns:
-        dict with 'size' (USD), 'edge' (%), 'kelly_fraction'.
-
-    Notes:
-        For 5-min binary markets, a win = full payout (~1.0x) minus fee,
-        a loss = full stake lost. Default win/loss based on Polymarket
-        5-min market typical payouts (market fee ~2%).
+        dict with 'size', 'edge', 'kelly_fraction'
     """
     settings = get_settings()
+    win_pct = settings.kelly_avg_win_pct    # avg win size (e.g. 0.07 = 7%)
+    loss_pct = settings.kelly_avg_loss_pct  # avg loss size (e.g. 0.04 = 4%)
+    max_frac = settings.kelly_max_fraction  # max kelly fraction (e.g. 0.25)
+    min_trade = settings.kelly_min_trade_usd
+    kelly_mult = settings.kelly_multiplier  # half-kelly = 0.5
+    slippage = 0.005
 
-    # Confidence normalised to [0, 1]
-    win_prob = max(0.0, min(1.0, confidence / 100.0))
+    # Confidence is 0-1 — do NOT divide by 100
+    # Clamp to valid range
+    win_prob = max(0.01, min(0.99, confidence))
     lose_prob = 1.0 - win_prob
 
-    # Win/loss pcts: how much you win/lose as fraction of stake
-    # For binary 5-min markets: win ≈ 0.94 (approx net after ~2% fee on ~$0.5 UP token)
-    # loss = 1.0 (full stake lost)
-    win_pct = win_pct_override if win_pct_override is not None else settings.kelly_avg_win_pct
-    loss_pct = loss_pct_override if loss_pct_override is not None else settings.kelly_avg_loss_pct
-
-    slippage = 0.005  # estimated slippage
-
-    # Kelly edge = E[return] = p*win - (1-p)*loss - slippage
+    # Expected edge per trade
     edge = (win_prob * win_pct) - (lose_prob * loss_pct) - slippage
 
     if edge <= 0:
-        # Negative edge: trade minimum only if confidence >= 0.55 (weak signal still valid)
-        min_trade = settings.kelly_min_trade_usd
         return {"size": min_trade, "edge": round(edge * 100, 2), "kelly_fraction": 0.0}
 
-    # Kelly fraction: f = edge / win_pct (simplified Kelly for binary outcomes)
-    kelly_f = edge / win_pct if win_pct > 0 else 0.0
-    kelly_f = min(kelly_f, settings.kelly_max_fraction)
+    # Kelly fraction: f* = edge / win_pct (simplified)
+    kelly_f = edge / win_pct if win_pct > 0 else 0
+    kelly_f = min(kelly_f, max_frac)
 
+    # Apply Kelly multiplier (half-Kelly default)
+    kelly_f *= kelly_mult
+
+    # Apply risk manager performance factor
+    try:
+        from polybot.risk_manager import get_risk_manager
+        sizing_factor = get_risk_manager().get_sizing_factor()
+        kelly_f *= sizing_factor
+    except Exception:
+        pass
+
+    # Calculate position size
     size = balance * kelly_f
-    # Bounds
-    size = max(size, settings.kelly_min_trade_usd)
-    size = min(size, base_trade_amount * 2.5)   # cap at 2.5x base (tighter than before)
-    size = min(size, balance * 0.20)             # never more than 20% of balance
+    size = max(size, min_trade)
+    size = min(size, settings.max_position_usd)  # hard cap from config
+    size = min(size, balance * (settings.max_position_size_pct / 100))  # % cap
+
+    log.debug(
+        "Kelly sizing",
+        confidence=f"{win_prob:.3f}",
+        edge=f"{edge*100:.2f}%",
+        kelly_f=f"{kelly_f:.4f}",
+        size=f"${size:.2f}",
+        balance=f"${balance:.2f}",
+    )
 
     return {
         "size": round(size, 2),
@@ -129,11 +138,9 @@ def calc_kelly_size(
 
 
 def _prepare_trade_params(market: dict, outcome: str) -> tuple[str | None, float]:
-    """Extract token_id and price from market data (shared logic)."""
+    """Extract token_id and price from market data."""
     if not isinstance(market, dict):
-        raise TypeError(
-            f"_prepare_trade_params: expected dict, got {type(market)}: {market!r}"
-        )
+        raise TypeError(f"expected dict, got {type(market)}: {market!r}")
     tokens = market.get("tokens", [])
     token_id = None
     for t in tokens:
@@ -150,210 +157,127 @@ def _prepare_trade_params(market: dict, outcome: str) -> tuple[str | None, float
 
 
 def _build_clob_client():
-    """Build a ClobClient with L2 API credentials for trade execution."""
+    """Build ClobClient with L2 API credentials."""
     from py_clob_client.client import ClobClient
     from py_clob_client.clob_types import ApiCreds
-
     from polybot.credentials_manager import get_cached_creds, get_or_create_l2_creds
 
     pk = get_settings().private_key_hex
     if not pk:
-        raise ValueError("No private key configured — trading disabled")
+        raise ValueError("No private key — trading disabled")
 
     creds = get_cached_creds()
     if not creds:
-        # Bootstrap on-demand if startup didn't run in time
-        log.warning("[EXECUTOR] Creds not ready — bootstrapping now...")
+        log.warning("[EXECUTOR] Creds not ready — bootstrapping...")
         creds = get_or_create_l2_creds()
 
     return ClobClient(
         "https://clob.polymarket.com",
-        key=pk,
-        chain_id=137,
-        creds=ApiCreds(
-            api_key=creds["api_key"],
-            api_secret=creds["api_secret"],
-            api_passphrase=creds["api_passphrase"],
-        ),
+        key=pk, chain_id=137,
+        creds=ApiCreds(api_key=creds["api_key"], api_secret=creds["api_secret"],
+                       api_passphrase=creds["api_passphrase"]),
     )
 
 
 def _outcome_to_side(outcome: str) -> str:
-    """Map outcome labels to BUY/SELL for onchain_executor."""
     return "BUY" if outcome.lower() in ("yes", "up") else "SELL"
 
 
-def place_trade(
-    market: dict,
-    outcome: str,
-    amount: float,
-    dry_run: bool = None,
-) -> dict | None:
-    """Place a trade on Polymarket (sync version) via onchain_executor.
-
-    Args:
-        market: Market dict from scanner (must have 'tokens' with token_ids)
-        outcome: 'yes' or 'no' (or 'up'/'down' for 5min markets)
-        amount: USDC amount
-        dry_run: If None, uses config.dry_run setting (env DRY_RUN override)
-
-    Returns:
-        Order result dict or None
-    """
+def place_trade(market: dict, outcome: str, amount: float, dry_run: bool = None) -> dict | None:
+    """Place a trade on Polymarket (sync) via onchain_executor."""
     dry_run = dry_run if dry_run is not None else get_settings().dry_run
-    token_id, current_price = _prepare_trade_params(market, outcome)
 
+    token_id, current_price = _prepare_trade_params(market, outcome)
     if not token_id:
-        log.error("No token_id found for outcome", outcome=outcome)
+        log.error("No token_id for outcome", outcome=outcome)
         return None
 
     if dry_run:
-        log.info(
-            "🧪 DRY RUN TRADE (simulated)",
-            amount=amount,
-            outcome=outcome,
-            market=market.get("question", "")[:60],
-        )
+        log.info("🧪 DRY RUN", amount=amount, outcome=outcome,
+                 market=market.get("question", "")[:60])
         return {"status": "dry_run", "amount": amount, "outcome": outcome}
 
     slug = market.get("slug", "unknown")
-    log.info(f"[ONCHAIN CYCLE MATCH] {slug}")
-    log.info(
-        "🚀 LIVE TRADE EXECUTING",
-        amount=amount,
-        outcome=outcome,
-        market=market.get("question", "")[:60],
-    )
+    log.info(f"[ONCHAIN] {slug}")
+    log.info("🚀 EXECUTING", amount=amount, outcome=outcome,
+             market=market.get("question", "")[:60])
 
     from polybot.onchain_executor import execute_trade as onchain_execute
 
     pk = get_settings().private_key_hex
-    side = _outcome_to_side(outcome)
-
     result = onchain_execute(
-        private_key=pk,
-        token_id=token_id,
-        amount_usdc=amount,
-        side=side,
-        current_price=current_price,
-        market=market,  # V88: Pass market for position tracking
+        private_key=pk, token_id=token_id, amount_usdc=amount,
+        side=_outcome_to_side(outcome), current_price=current_price,
+        market=market,
     )
-
     if result:
-        log.info(
-            f"[ONCHAIN TRADE SUCCESS] {slug} amount={amount} outcome={outcome}",
-        )
+        log.info(f"[TRADE OK] {slug} ${amount} {outcome}")
     return result
 
 
 async def place_trade_async(
-    market: dict,
-    outcome: str,
-    amount: float,
-    dry_run: bool = None,
-    token_id: str | None = None,
+    market: dict, outcome: str, amount: float,
+    dry_run: bool = None, token_id: str | None = None,
 ) -> dict | None:
-    """Place a trade on Polymarket (async version) via onchain_executor.
-
-    Uses asyncio.to_thread for blocking onchain_executor calls.
-
-    Args:
-        market: Market dict from scanner (must have 'tokens' with token_ids)
-        outcome: 'yes' or 'no' (or 'up'/'down' for 5min markets)
-        amount: USDC amount
-        dry_run: If None, uses config.dry_run setting (env DRY_RUN override)
-        token_id: Optional pre-resolved token_id. Skips _prepare_trade_params
-                  lookup when provided (used by V21 for direct Up-token resolution).
-
-    Returns:
-        Order result dict or None
-    """
+    """Place a trade on Polymarket (async) via onchain_executor."""
     _settings = get_settings()
     dry_run = dry_run if dry_run is not None else _settings.dry_run
 
     if getattr(_settings, "redeem_only", False) is True:
-        log.info(
-            "🛑 REDEEM_ONLY mode – trade blocked, only redemptions allowed",
-            amount=amount,
-            outcome=outcome,
-            market=market.get("question", "")[:60] if market else "",
-        )
+        log.info("🛑 REDEEM_ONLY — trade blocked")
         return {"status": "skipped", "reason": "redeem_only"}
 
-    # Always call _prepare_trade_params for current_price; override token_id
-    # only when caller provides a pre-resolved one (V21 Up-token path).
     resolved_token_id, current_price = _prepare_trade_params(market, outcome)
     if token_id is not None:
         resolved_token_id = token_id
     token_id = resolved_token_id
 
     if not token_id:
-        log.error("No token_id found for outcome", outcome=outcome)
+        log.error("No token_id for outcome", outcome=outcome)
         return None
 
     if dry_run:
-        log.info(
-            "🧪 DRY RUN TRADE (simulated)",
-            amount=amount,
-            outcome=outcome,
-            market=market.get("question", "")[:60],
-        )
+        log.info("🧪 DRY RUN", amount=amount, outcome=outcome,
+                 market=market.get("question", "")[:60])
         return {"status": "dry_run", "amount": amount, "outcome": outcome}
 
     slug = market.get("slug", "unknown")
-    log.info(f"[ONCHAIN CYCLE MATCH] {slug}")
-    log.info(
-        "🚀 LIVE TRADE EXECUTING",
-        amount=amount,
-        outcome=outcome,
-        market=market.get("question", "")[:60],
-    )
+    log.info(f"[ONCHAIN] {slug}")
+    log.info("🚀 EXECUTING", amount=amount, outcome=outcome,
+             market=market.get("question", "")[:60])
 
     from polybot.onchain_executor import execute_trade as onchain_execute
-
     pk = get_settings().private_key_hex
-    side = _outcome_to_side(outcome)
 
     result = await asyncio.to_thread(
-        onchain_execute,
-        private_key=pk,
-        token_id=token_id,
-        amount_usdc=amount,
-        side=side,
-        current_price=current_price,
-        market=market,  # V88: Pass market for position tracking
+        onchain_execute, private_key=pk, token_id=token_id,
+        amount_usdc=amount, side=_outcome_to_side(outcome),
+        current_price=current_price, market=market,
     )
-
     if result:
-        log.info(
-            f"[ONCHAIN TRADE SUCCESS] {slug} amount={amount} outcome={outcome}",
-        )
+        log.info(f"[TRADE OK] {slug} ${amount} {outcome}")
     return result
 
 
 def get_polygon_balance(client=None) -> float:
-    """Get USDC balance on Polygon via web3 (sync version)."""
+    """Get USDC balance on Polygon (sync)."""
     try:
-        settings = get_settings()
-        pk = settings.private_key_hex
+        pk = get_settings().private_key_hex
         if not pk:
             return 0.0
         from polybot.onchain_executor import get_usdc_balance
-
         return get_usdc_balance(pk)
     except Exception:
         return 0.0
 
 
 async def get_polygon_balance_async(client=None) -> float:
-    """Get USDC balance on Polygon via web3 (async version)."""
+    """Get USDC balance on Polygon (async)."""
     try:
-        settings = get_settings()
-        pk = settings.private_key_hex
+        pk = get_settings().private_key_hex
         if not pk:
             return 0.0
         from polybot.onchain_executor import get_usdc_balance
-
         return await asyncio.to_thread(get_usdc_balance, pk)
     except Exception:
         return 0.0

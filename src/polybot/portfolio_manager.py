@@ -153,6 +153,11 @@ class PortfolioManager:
         self._positions: list[Position] = []
         self._last_updated = datetime.now(timezone.utc).isoformat()
 
+    @property
+    def positions(self) -> list[Position]:
+        """Public access to positions list."""
+        return self._positions
+
     def classify_market(self, market_name: str) -> str:
         """Classify a market into a category.
 
@@ -200,10 +205,7 @@ class PortfolioManager:
         size_usd: float,
         category: str | None = None,
     ) -> tuple[bool, str]:
-        """Check if a new position can be added.
-
-        ⚠️ FORCED EXECUTION v5: This function ALWAYS returns True.
-        All position guards have been removed for forced execution.
+        """FORCED EXECUTION v5 — always allows new positions.
 
         Args:
             market_name: Market name for classification
@@ -211,9 +213,8 @@ class PortfolioManager:
             category: Optional pre-classified category
 
         Returns:
-            Tuple of (True, "FORCED_OK") - Always allows position
+            Tuple of (allowed: bool, reason: str)
         """
-        # FORCED EXECUTION v5: Force allow all positions, no guards
         return True, "FORCED_OK"
 
     def add_position(

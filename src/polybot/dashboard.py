@@ -1,9 +1,7 @@
-"""FastAPI web dashboard for monitoring PolyBot.
+"""Lightweight FastAPI dashboard — status, active trades, PnL.
 
-Provides:
-- HTML pages with Jinja2 templates (Overview, Trades, Positions, P&L)
-- JSON API endpoints for programmatic access
-- Real-time trade and P&L monitoring
+No scanner widget (reduces load). Green status bar when healthy.
+Shows active positions, recent trades, daily/total PnL, risk state.
 """
 
 from __future__ import annotations
@@ -17,466 +15,270 @@ from polybot.database import init_db, get_db
 
 
 def _get_risk_state() -> dict[str, Any]:
-    """Get current risk management state."""
-    with get_db() as conn:
-        row = conn.execute("SELECT * FROM risk_state WHERE id = 1").fetchone()
-        if row:
-            return dict(row)
-    return {"daily_loss": 0, "consecutive_losses": 0, "is_paused": False}
+    """Get risk state from database."""
+    try:
+        with get_db() as conn:
+            row = conn.execute("SELECT * FROM risk_state ORDER BY rowid DESC LIMIT 1").fetchone()
+            if row:
+                return dict(row)
+        return {"is_paused": 0, "daily_loss": 0, "consecutive_losses": 0}
+    except Exception:
+        return {"is_paused": 0, "daily_loss": 0, "consecutive_losses": 0}
 
 
 def _get_today_pnl() -> dict[str, Any]:
-    """Get today's P&L summary."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     with get_db() as conn:
-        row = conn.execute(
-            "SELECT * FROM daily_pnl WHERE date = ?", (today,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM daily_pnl WHERE date = ?", (today,)).fetchone()
         if row:
-            data = dict(row)
-            total = data.get("total_trades", 0)
-            winning = data.get("winning_trades", 0)
-            data["winrate"] = (winning / total * 100) if total > 0 else 0
-            return data
-    return {
-        "realized": 0,
-        "unrealized": 0,
-        "total_trades": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "winrate": 0,
-    }
+            d = dict(row)
+            total = d.get("total_trades", 0)
+            d["winrate"] = (d.get("winning_trades", 0) / total * 100) if total > 0 else 0
+            return d
+    return {"realized": 0, "unrealized": 0, "total_trades": 0, "winning_trades": 0, "losing_trades": 0, "winrate": 0}
 
 
 def _get_total_pnl() -> dict[str, Any]:
-    """Get total P&L across all time."""
     with get_db() as conn:
-        # Sum all daily P&L
-        row = conn.execute(
-            """SELECT
-                COALESCE(SUM(realized), 0) as total_realized,
-                COALESCE(SUM(unrealized), 0) as total_unrealized,
-                COALESCE(SUM(total_trades), 0) as total_trades,
-                COALESCE(SUM(winning_trades), 0) as winning_trades,
-                COALESCE(SUM(losing_trades), 0) as losing_trades
-            FROM daily_pnl"""
-        ).fetchone()
+        row = conn.execute("""SELECT
+            COALESCE(SUM(realized), 0) as total_realized,
+            COALESCE(SUM(unrealized), 0) as total_unrealized,
+            COALESCE(SUM(total_trades), 0) as total_trades,
+            COALESCE(SUM(winning_trades), 0) as winning_trades,
+            COALESCE(SUM(losing_trades), 0) as losing_trades
+        FROM daily_pnl""").fetchone()
         if row:
-            data = dict(row)
-            total = data.get("total_trades", 0)
-            winning = data.get("winning_trades", 0)
-            data["overall_winrate"] = (winning / total * 100) if total > 0 else 0
-            return data
+            d = dict(row)
+            total = d.get("total_trades", 0)
+            d["overall_winrate"] = (d.get("winning_trades", 0) / total * 100) if total > 0 else 0
+            return d
+    return {"total_realized": 0, "total_unrealized": 0, "total_trades": 0, "overall_winrate": 0}
+
+
+def _get_bot_status() -> dict[str, Any]:
+    """Overall bot health status."""
+    settings = get_settings()
+    risk = _get_risk_state()
+    from polybot.sniper import is_sniper_mode
+
     return {
-        "total_realized": 0,
-        "total_unrealized": 0,
-        "total_trades": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "overall_winrate": 0,
+        "healthy": not risk.get("is_paused", False),
+        "mode": "SNIPER" if (is_sniper_mode() or settings.mode == "sniper") else settings.mode.upper(),
+        "dry_run": settings.dry_run,
+        "model": settings.model if hasattr(settings, "model") else "N/A",
+        "paused": risk.get("is_paused", False),
+        "pause_reason": risk.get("pause_reason", ""),
     }
 
 
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PolyBot Dashboard</title>
+<meta http-equiv="refresh" content="15">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;padding:16px}
+.status-bar{padding:12px 20px;border-radius:8px;font-weight:600;font-size:18px;margin-bottom:16px;display:flex;align-items:center;gap:10px}
+.status-ok{background:#0d3d1f;border:1px solid #238636;color:#3fb950}
+.status-warn{background:#3d2d00;border:1px solid #d29922;color:#e3b341}
+.status-bad{background:#3d0d0d;border:1px solid #da3633;color:#f85149}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px}
+.card h3{color:#58a6ff;margin-bottom:12px;font-size:14px;text-transform:uppercase;letter-spacing:0.5px}
+.stat{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #21262d}
+.stat:last-child{border-bottom:none}
+.stat .label{color:#8b949e;font-size:13px}
+.stat .value{font-weight:600;font-size:14px}
+.positive{color:#3fb950}.negative{color:#f85149}.neutral{color:#c9d1d9}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px;color:#58a6ff;border-bottom:2px solid #30363d;font-size:12px;text-transform:uppercase}
+td{padding:6px 8px;border-bottom:1px solid #21262d}
+tr:hover{background:#1c2128}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-win{background:#0d3d1f;color:#3fb950}
+.badge-loss{background:#3d0d0d;color:#f85149}
+.badge-open{background:#0d2d3d;color:#58a6ff}
+.footer{margin-top:16px;text-align:center;color:#484f58;font-size:12px}
+</style>
+</head>
+<body>
+
+<!-- Status Bar -->
+<div class="status-bar {{ 'status-ok' if status.healthy else ('status-warn' if status.paused else 'status-bad') }}">
+    <span>{{ '🟢' if status.healthy else '🟡' if status.paused else '🔴' }}</span>
+    <span>{{ status.mode }}{% if status.dry_run %} (DRY RUN){% endif %}</span>
+    {% if status.paused %}<span style="margin-left:auto;font-size:14px">⚠️ {{ status.pause_reason }}</span>{% endif %}
+    {% if not status.paused %}<span style="margin-left:auto;font-size:14px">All systems operational</span>{% endif %}
+</div>
+
+<!-- Stats Grid -->
+<div class="grid">
+    <!-- Today PnL -->
+    <div class="card">
+        <h3>📊 Today</h3>
+        <div class="stat"><span class="label">Realized P&L</span><span class="value {{ 'positive' if pnl.realized >= 0 else 'negative' }}">${{ "%.2f"|format(pnl.realized) }}</span></div>
+        <div class="stat"><span class="label">Trades</span><span class="value">{{ pnl.total_trades }} ({{ "%.0f"|format(pnl.winrate) }}% WR)</span></div>
+        <div class="stat"><span class="label">W / L</span><span class="value"><span class="positive">{{ pnl.winning_trades }}</span> / <span class="negative">{{ pnl.losing_trades }}</span></span></div>
+    </div>
+
+    <!-- Total PnL -->
+    <div class="card">
+        <h3>💰 All Time</h3>
+        <div class="stat"><span class="label">Total P&L</span><span class="value {{ 'positive' if total.total_realized >= 0 else 'negative' }}">${{ "%.2f"|format(total.total_realized) }}</span></div>
+        <div class="stat"><span class="label">Total Trades</span><span class="value">{{ total.total_trades }}</span></div>
+        <div class="stat"><span class="label">Win Rate</span><span class="value">{{ "%.1f"|format(total.overall_winrate) }}%</span></div>
+    </div>
+
+    <!-- Risk State -->
+    <div class="card">
+        <h3>🛡️ Risk</h3>
+        <div class="stat"><span class="label">Daily Loss</span><span class="value negative">${{ "%.2f"|format(risk.daily_loss) }} / ${{ "%.2f"|format(risk.max_daily_loss) }}</span></div>
+        <div class="stat"><span class="label">Streak</span><span class="value">
+            {% if risk.consecutive_wins > 0 %}<span class="positive">+{{ risk.consecutive_wins }}W</span>
+            {% elif risk.consecutive_losses > 0 %}<span class="negative">-{{ risk.consecutive_losses }}L</span>
+            {% else %}<span class="neutral">0</span>{% endif %}
+        </span></div>
+        <div class="stat"><span class="label">Drawdown</span><span class="value">{{ "%.1f"|format(risk.current_drawdown_pct) }}%</span></div>
+        <div class="stat"><span class="label">Sizing Factor</span><span class="value">{{ "%.0f"|format(risk.get('sizing_factor', 1.0) * 100) }}%</span></div>
+        <div class="stat"><span class="label">Trades Left</span><span class="value">{{ risk.trades_remaining }}</span></div>
+    </div>
+</div>
+
+<!-- Active Positions -->
+<div class="card" style="margin-bottom:12px">
+    <h3>📈 Active Positions ({{ positions|length }})</h3>
+    {% if positions %}
+    <table>
+        <tr><th>Market</th><th>Side</th><th>Size</th><th>Entry</th><th>Current</th><th>P&L</th></tr>
+        {% for p in positions %}
+        <tr>
+            <td>{{ p.market_name[:40] if p.market_name else p.market_id[:20] }}</td>
+            <td><span class="badge badge-open">{{ p.side }}</span></td>
+            <td>${{ "%.2f"|format(p.size_usd) if p.size_usd else '?' }}</td>
+            <td>{{ "%.3f"|format(p.entry_price) if p.entry_price else '?' }}</td>
+            <td>{{ "%.3f"|format(p.current_price) if p.current_price else '?' }}</td>
+            <td class="{{ 'positive' if (p.unrealized_pnl or 0) >= 0 else 'negative' }}">
+                ${{ "%.2f"|format(p.unrealized_pnl) if p.unrealized_pnl else '0.00' }}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:#484f58;padding:8px 0">No active positions</p>
+    {% endif %}
+</div>
+
+<!-- Recent Trades -->
+<div class="card">
+    <h3>📋 Recent Trades</h3>
+    {% if trades %}
+    <table>
+        <tr><th>Time</th><th>Market</th><th>Side</th><th>Amount</th><th>Result</th></tr>
+        {% for t in trades %}
+        <tr>
+            <td style="white-space:nowrap">{{ t.created_at[:16] if t.created_at else '?' }}</td>
+            <td>{{ (t.market_name or t.slug or '')[:35] }}</td>
+            <td>{{ t.outcome or t.side or '?' }}</td>
+            <td>${{ "%.2f"|format(t.amount) if t.amount else '?' }}</td>
+            <td>
+                {% if t.profit is not none %}
+                <span class="badge {{ 'badge-win' if t.profit >= 0 else 'badge-loss' }}">
+                    ${{ "%.2f"|format(t.profit) }}
+                </span>
+                {% else %}
+                <span class="badge badge-open">pending</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </table>
+    {% else %}
+    <p style="color:#484f58;padding:8px 0">No trades yet</p>
+    {% endif %}
+</div>
+
+<div class="footer">PolyBot Dashboard — auto-refreshes every 15s</div>
+</body>
+</html>"""
+
+
 def run_dashboard():
-    """Start the FastAPI dashboard with Jinja2 templates."""
+    """Start the FastAPI dashboard."""
     import uvicorn
     from fastapi import FastAPI, Request
     from fastapi.responses import HTMLResponse
-    from fastapi.templating import Jinja2Templates
     from starlette.middleware.cors import CORSMiddleware
+    from jinja2 import Environment, BaseLoader
 
     settings = get_settings()
     init_db()
 
-    app = FastAPI(
-        title="PolyBot Dashboard",
-        description="Web dashboard for monitoring PolyBot trading activity",
-        version="1.0.0",
-    )
-
-    # Enable CORS for API access
+    app = FastAPI(title="PolyBot Dashboard", version="2.0")
     app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+        allow_methods=["*"], allow_headers=["*"],
     )
 
-    # Setup Jinja2 templates
-    templates_dir = Path(__file__).parent / "templates"
-    templates = Jinja2Templates(directory=str(templates_dir))
-
-    # =========================================================================
-    # HTML Pages
-    # =========================================================================
+    jinja_env = Environment(loader=BaseLoader(), autoescape=True)
+    template = jinja_env.from_string(DASHBOARD_HTML)
 
     @app.get("/", response_class=HTMLResponse)
-    async def index(request: Request):
-        """Dashboard overview page."""
+    async def index():
         with get_db() as conn:
-            trades = conn.execute(
-                "SELECT * FROM trades ORDER BY id DESC LIMIT 20"
-            ).fetchall()
-            positions = conn.execute(
-                "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY id DESC LIMIT 10"
-            ).fetchall()
-            arb_executions = conn.execute(
-                "SELECT * FROM arb_executions ORDER BY id DESC LIMIT 10"
-            ).fetchall()
+            trades_rows = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 20").fetchall()
+            positions_rows = conn.execute("SELECT * FROM positions WHERE status = 'OPEN' ORDER BY id DESC LIMIT 10").fetchall()
 
-        return templates.TemplateResponse(
-            "index.html",
-            {
-                "request": request,
-                "active_page": "overview",
-                "risk": _get_risk_state(),
-                "pnl": _get_today_pnl(),
-                "trades": [dict(t) for t in trades],
-                "positions": [dict(p) for p in positions],
-                "arb_executions": [dict(a) for a in arb_executions],
-            },
+        trades = [dict(t) for t in trades_rows]
+        positions = [dict(p) for p in positions_rows]
+
+        return template.render(
+            status=_get_bot_status(),
+            risk=_get_risk_state(),
+            pnl=_get_today_pnl(),
+            total=_get_total_pnl(),
+            trades=trades,
+            positions=positions,
         )
 
-    @app.get("/trades", response_class=HTMLResponse)
-    async def trades_page(request: Request):
-        """Trades history page."""
-        with get_db() as conn:
-            trades = conn.execute(
-                "SELECT * FROM trades ORDER BY id DESC LIMIT 100"
-            ).fetchall()
-
-        return templates.TemplateResponse(
-            "trades.html",
-            {
-                "request": request,
-                "active_page": "trades",
-                "trades": [dict(t) for t in trades],
-            },
-        )
-
-    @app.get("/positions", response_class=HTMLResponse)
-    async def positions_page(request: Request):
-        """Positions page."""
-        with get_db() as conn:
-            open_positions = conn.execute(
-                "SELECT * FROM positions WHERE status = 'OPEN' ORDER BY id DESC"
-            ).fetchall()
-            closed_positions = conn.execute(
-                "SELECT * FROM positions WHERE status != 'OPEN' ORDER BY id DESC LIMIT 50"
-            ).fetchall()
-
-        return templates.TemplateResponse(
-            "positions.html",
-            {
-                "request": request,
-                "active_page": "positions",
-                "open_positions": [dict(p) for p in open_positions],
-                "closed_positions": [dict(p) for p in closed_positions],
-            },
-        )
-
-    @app.get("/pnl", response_class=HTMLResponse)
-    async def pnl_page(request: Request):
-        """P&L history page."""
-        with get_db() as conn:
-            daily_pnl = conn.execute(
-                "SELECT * FROM daily_pnl ORDER BY date DESC LIMIT 30"
-            ).fetchall()
-
-        # Add winrate to each day
-        daily_data = []
-        for day in daily_pnl:
-            d = dict(day)
-            total = d.get("total_trades", 0)
-            winning = d.get("winning_trades", 0)
-            d["winrate"] = (winning / total * 100) if total > 0 else 0
-            daily_data.append(d)
-
-        return templates.TemplateResponse(
-            "pnl.html",
-            {
-                "request": request,
-                "active_page": "pnl",
-                "total_pnl": _get_total_pnl(),
-                "today_pnl": _get_today_pnl(),
-                "daily_pnl": daily_data,
-            },
-        )
-
-    # =========================================================================
-    # JSON API Endpoints
-    # =========================================================================
+    # ── JSON API endpoints ──
+    @app.get("/api/status")
+    async def api_status():
+        return {
+            "status": _get_bot_status(),
+            "risk": _get_risk_state(),
+            "pnl_today": _get_today_pnl(),
+            "pnl_total": _get_total_pnl(),
+        }
 
     @app.get("/api/trades")
-    async def api_trades(limit: int = 100):
-        """Get recent trades as JSON."""
+    async def api_trades():
         with get_db() as conn:
-            trades = conn.execute(
-                "SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-        return [dict(t) for t in trades]
+            rows = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 100").fetchall()
+        return [dict(r) for r in rows]
 
     @app.get("/api/positions")
-    async def api_positions(status: str = "OPEN"):
-        """Get positions as JSON."""
+    async def api_positions():
         with get_db() as conn:
-            if status.upper() == "ALL":
-                positions = conn.execute(
-                    "SELECT * FROM positions ORDER BY id DESC"
-                ).fetchall()
-            else:
-                positions = conn.execute(
-                    "SELECT * FROM positions WHERE status = ? ORDER BY id DESC",
-                    (status.upper(),),
-                ).fetchall()
-        return [dict(p) for p in positions]
-
-    @app.get("/api/risk")
-    async def api_risk():
-        """Get current risk state as JSON."""
-        return _get_risk_state()
+            rows = conn.execute("SELECT * FROM positions WHERE status = 'OPEN' ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
 
     @app.get("/api/pnl")
     async def api_pnl():
-        """Get P&L summary as JSON."""
-        return {
-            "today": _get_today_pnl(),
-            "total": _get_total_pnl(),
-        }
-
-    @app.get("/api/pnl/daily")
-    async def api_daily_pnl(days: int = 30):
-        """Get daily P&L history as JSON."""
         with get_db() as conn:
-            daily_pnl = conn.execute(
-                "SELECT * FROM daily_pnl ORDER BY date DESC LIMIT ?", (days,)
-            ).fetchall()
-
-        result = []
-        for day in daily_pnl:
-            d = dict(day)
+            rows = conn.execute("SELECT * FROM daily_pnl ORDER BY date DESC LIMIT 30").fetchall()
+        data = []
+        for r in rows:
+            d = dict(r)
             total = d.get("total_trades", 0)
-            winning = d.get("winning_trades", 0)
-            d["winrate"] = (winning / total * 100) if total > 0 else 0
-            result.append(d)
-        return result
+            d["winrate"] = (d.get("winning_trades", 0) / total * 100) if total > 0 else 0
+            data.append(d)
+        return data
 
-    @app.get("/api/arb")
-    async def api_arb(limit: int = 50):
-        """Get arbitrage executions as JSON."""
-        with get_db() as conn:
-            arbs = conn.execute(
-                "SELECT * FROM arb_executions ORDER BY id DESC LIMIT ?", (limit,)
-            ).fetchall()
-        return [dict(a) for a in arbs]
-
-    @app.get("/api/scanner")
-    async def api_scanner(limit: int = 5):
-        """Run MaxProfit scanner and return high-EV opportunities.
-
-        This endpoint triggers a live scan of Polymarket markets and returns
-        the top high-EV opportunities prioritized by:
-        1. Arbitrage opportunities (risk-free)
-        2. CEX-Edge opportunities (Binance price vs market implied)
-        3. High liquidity + volume markets
-        """
-        from polybot.scanner import MaxProfitScanner
-
-        scanner = MaxProfitScanner()
-        results = await scanner.scan_async(limit=limit)
-
-        return {
-            "status": f"Scanning {scanner.markets_scanned} markets... {len(results)} high-EV found!",
-            "markets_scanned": scanner.markets_scanned,
-            "high_ev_count": len(results),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "high_ev": results,
-        }
-
-    @app.get("/api/scanner/5min")
-    async def api_scanner_5min():
-        """Get 5-minute EXCLUSIVE scanner status and active markets.
-
-        Returns the current scanner configuration and any active
-        5-minute crypto markets (BTC, ETH, SOL, XRP only).
-        """
-        try:
-            from polybot.scanner_updown import get_updown_scanner
-
-            scanner = get_updown_scanner()
-            markets = scanner.scan()
-            status = scanner.get_status()
-
-            return {
-                "mode": "5-MINUTE EXCLUSIVE",
-                "mode_active": True,
-                "description": "Only 5-minute crypto events (max 300 seconds)",
-                "scanner_status": status,
-                "active_5min_markets": len(markets),
-                "markets": markets,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        except ImportError:
-            return {"error": "5-minute scanner not available"}
-
-    @app.get("/api/backtest")
-    async def api_backtest(days: int = 180):
-        """Run backtest and return results.
-
-        Args:
-            days: Number of days to backtest (default: 180)
-
-        Returns:
-            Backtest results with equity curve and metrics
-        """
-        from polybot.backtester import Backtester
-
-        bt = Backtester()
-        result = bt.run_backtest(days=days)
-        return result.to_dict()
-
-    @app.get("/api/portfolio")
-    async def api_portfolio():
-        """Get current portfolio state and exposure metrics."""
-        try:
-            from polybot.portfolio_manager import get_portfolio_manager
-
-            pm = get_portfolio_manager()
-            state = pm.get_state()
-            return {
-                **state.to_dict(),
-                "warnings": pm.get_correlation_warnings(),
-                "heatmap_data": pm.get_heatmap_data(),
-            }
-        except ImportError:
-            return {"error": "Portfolio manager not available"}
-
-    @app.get("/api/volatility")
-    async def api_volatility():
-        """Get current volatility regime and Kelly multiplier."""
-        try:
-            from polybot.volatility_regime import get_volatility_detector
-
-            detector = get_volatility_detector()
-            state = detector.get_state()
-            return state.to_dict()
-        except ImportError:
-            return {"error": "Volatility detector not available"}
-
-    @app.get("/api/hourly_risk")
-    async def api_hourly_risk():
-        """Get hourly risk regime state and 24-hour heatmap data.
-
-        Returns the current Berlin hour, risk multiplier, and a
-        complete 24-hour heatmap for dashboard visualization.
-
-        Colors:
-        - Grey (#6B7280): inactive (multiplier = 0.0)
-        - Red (#EF4444): conservative (multiplier = 0.3)
-        - Green (#22C55E): aggressive (multiplier = 1.6-1.8)
-        """
-        try:
-            from polybot.hourly_risk_regime import get_hourly_risk_regime
-
-            regime = get_hourly_risk_regime()
-            state = regime.get_state()
-            desc = (
-                "Hourly Risk Regime (Berlin-Zeit): "
-                "Grau = inaktiv | Rot = konservativ | Grün = aggressiv"
-            )
-            return {
-                "current": state.to_dict(),
-                "heatmap": regime.get_heatmap_data(),
-                "description": desc,
-            }
-        except ImportError:
-            return {"error": "Hourly risk regime not available"}
-
-    @app.get("/api/executions")
-    async def api_executions(limit: int = 50):
-        """Get recent trade executions with slippage data."""
-        try:
-            from polybot.execution_logger import get_execution_logger
-
-            logger = get_execution_logger()
-            return {
-                "executions": logger.get_recent_executions(limit=limit),
-                "stats": logger.get_stats().to_dict(),
-                "slippage_analysis": logger.get_slippage_analysis(),
-            }
-        except ImportError:
-            return {"error": "Execution logger not available"}
-
-    @app.get("/api/analytics")
-    async def api_analytics():
-        """Get combined analytics data for dashboard."""
-        analytics = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
-
-        # Get backtest data
-        try:
-            from polybot.backtester import Backtester
-
-            bt = Backtester()
-            result = bt.run_backtest(days=30)
-            analytics["backtest"] = result.to_dict()
-        except Exception as e:
-            analytics["backtest"] = {"error": str(e)}
-
-        # Get portfolio data
-        try:
-            from polybot.portfolio_manager import get_portfolio_manager
-
-            pm = get_portfolio_manager()
-            state = pm.get_state()
-            analytics["portfolio"] = {
-                **state.to_dict(),
-                "heatmap_data": pm.get_heatmap_data(),
-            }
-        except Exception as e:
-            analytics["portfolio"] = {"error": str(e)}
-
-        # Get volatility data
-        try:
-            from polybot.volatility_regime import get_volatility_detector
-
-            detector = get_volatility_detector()
-            analytics["volatility"] = detector.get_state().to_dict()
-        except Exception as e:
-            analytics["volatility"] = {"error": str(e)}
-
-        # Get hourly risk regime data
-        try:
-            from polybot.hourly_risk_regime import get_hourly_risk_regime
-
-            regime = get_hourly_risk_regime()
-            analytics["hourly_risk"] = {
-                "current": regime.get_state().to_dict(),
-                "heatmap": regime.get_heatmap_data(),
-            }
-        except Exception as e:
-            analytics["hourly_risk"] = {"error": str(e)}
-
-        # Get execution stats
-        try:
-            from polybot.execution_logger import get_execution_logger
-
-            logger = get_execution_logger()
-            analytics["executions"] = {
-                "stats": logger.get_stats().to_dict(),
-                "recent": logger.get_recent_executions(limit=10),
-            }
-        except Exception as e:
-            analytics["executions"] = {"error": str(e)}
-
-        return analytics
-
-    @app.get("/api/health")
+    @app.get("/health")
     async def health():
-        """Health check endpoint."""
-        return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+        return {"status": "ok", "mode": settings.mode}
 
-    print(f"🌐 Dashboard starting on http://0.0.0.0:{settings.dashboard_port}")
-    uvicorn.run(app, host="0.0.0.0", port=settings.dashboard_port)
+    port = int(settings.port if hasattr(settings, "port") else 8000)
+    uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")

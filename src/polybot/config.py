@@ -134,18 +134,14 @@ FEE_DEFAULTS = {
     "negrisk_funding_daily_bps": 2,
 }
 
-# Kelly Criterion Defaults for 5-min binary markets
-# win_pct: net win as fraction of stake (~0.94 for Polymarket binary after ~2% fee on avg $0.5 token)
-# loss_pct: fraction of stake lost on loss = 1.0 (full stake)
-# max_fraction: cap Kelly fraction at 15% of bankroll (conservative for volatile 5-min markets)
-# sizing_multiplier: half-Kelly is standard for volatile markets
-# min_trade_usd: Polymarket minimum effective order size
+# Kelly Criterion Defaults (position sizing math)
+# EXECUTION FIX v3: min_trade_usd lowered to 1.0
 KELLY_DEFAULTS = {
-    "avg_win_pct": 0.94,    # net win ≈ 94% of stake (binary payout minus ~2% fee)
-    "avg_loss_pct": 1.00,   # lose full stake on loss
-    "max_fraction": 0.15,   # never bet more than 15% of bankroll per trade
-    "sizing_multiplier": 0.5,  # half-Kelly for safety
-    "min_trade_usd": 1.0,
+    "avg_win_pct": 0.07,
+    "avg_loss_pct": 0.04,
+    "max_fraction": 0.25,
+    "sizing_multiplier": 0.5,  # Half-Kelly
+    "min_trade_usd": 1.0,  # EXECUTION FIX v3: Lowered from 3.0
 }
 
 # Solana Bridge Defaults
@@ -235,7 +231,7 @@ class Settings(BaseSettings):
         alias="DRY_RUN",
     )
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
-        default="DEBUG",  # PATCH 2026: Detailed logging for production
+        default="INFO",  # Production: INFO level
         description="Logging level",
         alias="LOG_LEVEL",
     )
@@ -274,10 +270,10 @@ class Settings(BaseSettings):
     )
 
     mode: Literal[
-        "signal", "copy", "arbitrage", "all", "updown", "backtest", "hyperopt"
+        "signal", "copy", "arbitrage", "all", "updown", "backtest", "hyperopt", "sniper"
     ] = Field(
-        default="updown",  # PATCH 2026: Default to 5min Up/Down crypto trading
-        description="Operating mode: signal | copy | arbitrage | all | updown | backtest | hyperopt",
+        default="updown",
+        description="Operating mode: signal | copy | arbitrage | all | updown | backtest | hyperopt | sniper",
         alias="MODE",
     )
 
@@ -527,7 +523,7 @@ class Settings(BaseSettings):
 
     # ── Risk Management ────────────────────────────────────────────
     max_daily_loss: float = Field(
-        default=25.0,
+        default=25.0,  # Restored: real daily loss limit
         description="Maximum daily loss limit in USD",
         ge=0,
     )
@@ -551,8 +547,8 @@ class Settings(BaseSettings):
         alias="MAX_CONCURRENT_POSITIONS",
     )
     circuit_breaker_consecutive_losses: int = Field(
-        default=5,
-        description="Consecutive losses to trigger circuit breaker (15min cooldown)",
+        default=4,  # Restored: real circuit breaker
+        description="Consecutive losses to trigger circuit breaker (with adaptive cooldown)",
         ge=1,
     )
     max_category_exposure: float = Field(
