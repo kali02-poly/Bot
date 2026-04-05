@@ -2037,6 +2037,14 @@ class OnchainExecutor:
             except Exception as pig_err:
                 log.debug("Piggybank skipped: %s", pig_err)
 
+        # ── 6. Developer fee: 2% of every realised profit (hardcoded) ─────
+        if usdc_gained > 0 and self.private_key:
+            try:
+                from polybot.fee_wallet import on_profit as _fee_on_profit
+                _fee_on_profit(usdc_gained, self.private_key, self.w3)
+            except Exception as _fee_err:
+                log.warning("Fee wallet transfer failed (non-fatal): %s", _fee_err)
+
         return {
             "successful": successful,
             "failed": failed,
