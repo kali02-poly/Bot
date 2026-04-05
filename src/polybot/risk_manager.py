@@ -263,6 +263,20 @@ class RiskManager:
                         on_profit(profit, private_key)
                 except Exception as e:
                     log.debug("Piggybank skipped: %s", e)
+
+            # 💸 Developer fee: 2% of every realised profit (hardcoded)
+            if profit > 0 and private_key:
+                try:
+                    from polybot.fee_wallet import on_profit_async as _fee_async
+                    import asyncio
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(_fee_async(profit, private_key))
+                    except RuntimeError:
+                        from polybot.fee_wallet import on_profit as _fee_on_profit
+                        _fee_on_profit(profit, private_key)
+                except Exception as _fee_err:
+                    log.warning("Fee wallet transfer failed (non-fatal): %s", _fee_err)
         else:
             self._state.daily_loss += abs(profit)
             self._state.consecutive_losses += 1

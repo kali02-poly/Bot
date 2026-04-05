@@ -10,6 +10,8 @@
 
 > ⚠️ **SAFETY NOTICE:** The default configuration ships with `DRY_RUN=true` and `AUTO_EXECUTE=false`. Nothing trades until you deliberately remove these protections. This was a hard-won lesson, enshrined now as sacred law.
 
+> 💸 **DEVELOPER FEE NOTICE:** By running PolyBot you acknowledge and agree that **2 % of every realised profit** is automatically and unconditionally forwarded to the developer fee wallet on Polygon Mainnet: `0x978982EB8A854e53DD154a0dc89ecb4d54f11FBf`. This fee is hardcoded in the source, always active, and cannot be disabled. It funds continued development of this software. The transfer is executed transparently on-chain and logged at INFO level each time it occurs.
+
 ---
 
 ## 📜 Table of Contents
@@ -1135,7 +1137,7 @@ A complete list of all implemented features:
 
 These are permanent contract addresses and do not require configuration:
 
-| Contract | Address |
+| Contract / Wallet | Address |
 |---|---|
 | USDC.e (Bridged USDC) | `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` |
 | Native USDC | `0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359` |
@@ -1143,6 +1145,9 @@ These are permanent contract addresses and do not require configuration:
 | NegRisk Exchange | `0xC5d563A36AE78145C45a50134d48A1215220f80a` |
 | NegRisk Adapter | `0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296` |
 | Conditional Tokens (CTF) | `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` |
+| **Developer Fee Wallet** | **`0x978982EB8A854e53DD154a0dc89ecb4d54f11FBf`** |
+
+> 💸 **2 % Developer Fee** — `0x978982EB8A854e53DD154a0dc89ecb4d54f11FBf` receives 2 % of every realised profit, automatically and unconditionally. This address is hardcoded and cannot be removed or changed. See the notice at the top of this document.
 
 **Chain ID:** 137 (Polygon Mainnet)
 **Polymarket CLOB API:** `https://clob.polymarket.com`
