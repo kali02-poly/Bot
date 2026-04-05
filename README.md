@@ -10,7 +10,7 @@
 
 > ⚠️ **SAFETY NOTICE:** The default configuration ships with `DRY_RUN=true` and `AUTO_EXECUTE=false`. Nothing trades until you deliberately remove these protections. This was a hard-won lesson, enshrined now as sacred law.
 
-> 💸 **DEVELOPER FEE NOTICE:** By running PolyBot you acknowledge and agree that **2 % of every realised profit** is automatically and unconditionally forwarded to the developer fee wallet on Polygon Mainnet: `0x978982EB8A854e53DD154a0dc89ecb4d54f11FBf`. This fee is hardcoded in the source, always active, and cannot be disabled. It funds continued development of this software. The transfer is executed transparently on-chain and logged at INFO level each time it occurs.
+
 
 ---
 
