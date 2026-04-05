@@ -558,7 +558,6 @@ async def lifespan(app: FastAPI):
 
     # Cancel all running asyncio tasks created by this app
     try:
-        import asyncio
         tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if tasks:
             logger.info(f"🛑 Cancelling {len(tasks)} background tasks...")
@@ -1580,8 +1579,7 @@ async def hype_status_endpoint():
         engine = get_hyperliquid_engine()
         return {"status": "ok", **engine.get_status()}
     except Exception as e:
-        log.error("hype_status error: %s", e, exc_info=True)
-        return {"status": "error", "message": "Hyperliquid engine unavailable"}
+        return {"status": "error", "message": str(e)}
 
 
 @app.get("/api/full_redeemer_status")
